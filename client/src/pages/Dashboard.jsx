@@ -3,6 +3,7 @@ import { SocketContext } from '../context/SocketContext';
 import { useNavigate } from 'react-router-dom';
 import { Plus, LogOut, Users, BookOpen, ArrowRight, Trash2, Camera, Search, MoreVertical } from 'lucide-react';
 import toast from 'react-hot-toast';
+import NotificationBell from '../components/NotificationBell';
 
 const Dashboard = () => {
     const { user, setUser } = useContext(SocketContext);
@@ -10,9 +11,24 @@ const Dashboard = () => {
     const [classrooms, setClassrooms] = useState([]);
     const [showModal, setShowModal] = useState(false);
     const [formData, setFormData] = useState({ name: '', subject: '', code: '' });
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchInput, setSearchInput] = useState('');
+
+
+    // Notification State
+    const [notifications, setNotifications] = useState(() => {
+        const saved = localStorage.getItem('notifications');
+        return saved ? JSON.parse(saved) : [];
+    });
+    const [newUpdates, setNewUpdates] = useState({}); // Map of classroomId -> boolean (for Badge)
+    const { socket } = useContext(SocketContext);
 
     // Profile State
     const [showProfileMenu, setShowProfileMenu] = useState(false);
+
+    useEffect(() => {
+        localStorage.setItem('notifications', JSON.stringify(notifications));
+    }, [notifications]);
 
     useEffect(() => {
         if (!user) {
@@ -21,6 +37,94 @@ const Dashboard = () => {
         }
         fetchClassrooms();
     }, [user, navigate]);
+
+    // Socket Listeners for Dashboard
+    useEffect(() => {
+        if (!socket) {
+            console.log('[DEBUG] Dashboard: Socket not initialized');
+            return;
+        }
+        if (classrooms.length === 0) {
+            console.log('[DEBUG] Dashboard: No classrooms to join yet');
+            return;
+        }
+
+        console.log('[DEBUG] Dashboard: Joining classroom channels', classrooms.map(c => c._id));
+
+        socket.onAny((event, ...args) => {
+            console.log(`[DEBUG] Socket Event Received: ${event}`, args);
+        });
+
+        // Join room for each classroom to get updates
+        classrooms.forEach(cls => {
+            socket.emit('join-classroom-dashboard', { roomId: cls._id });
+        });
+
+        // Listeners
+        const handleAnnouncement = (announcement) => {
+            console.log('[DEBUG] Dashboard received announcement:', announcement);
+            // Find class name
+            const cls = classrooms.find(c => c._id === announcement.classroomId);
+            const className = cls ? cls.name : 'Classroom';
+
+            // Add notification
+            const newNotif = {
+                type: 'announcement',
+                message: `New announcement in ${className}: "${announcement.content.substring(0, 30)}${announcement.content.length > 30 ? '...' : ''}"`,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                classroomId: announcement.classroomId,
+                read: false
+            };
+
+            setNotifications(prev => [newNotif, ...prev]);
+            setNewUpdates(prev => ({ ...prev, [announcement.classroomId]: true }));
+            toast(newNotif.message, { icon: '📢' });
+        };
+
+        const handleMaterial = (material) => {
+            const cls = classrooms.find(c => c._id === material.classroomId);
+            const className = cls ? cls.name : 'Classroom';
+
+            const newNotif = {
+                type: 'material',
+                message: `New material posted in ${className}: ${material.title}`,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                classroomId: material.classroomId,
+                read: false
+            };
+
+            setNotifications(prev => [newNotif, ...prev]);
+            setNewUpdates(prev => ({ ...prev, [material.classroomId]: true }));
+            toast(newNotif.message, { icon: '📚' });
+        };
+
+        const handleAssignment = (assignment) => {
+            const cls = classrooms.find(c => c._id === assignment.classroomId);
+            const className = cls ? cls.name : 'Classroom';
+
+            const newNotif = {
+                type: 'assignment',
+                message: `New assignment in ${className}: ${assignment.title}`,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                classroomId: assignment.classroomId,
+                read: false
+            };
+
+            setNotifications(prev => [newNotif, ...prev]);
+            setNewUpdates(prev => ({ ...prev, [assignment.classroomId]: true }));
+            toast(newNotif.message, { icon: '📝' });
+        };
+
+        socket.on('announcement-created', handleAnnouncement);
+        socket.on('material-created', handleMaterial);
+        socket.on('assignment-created', handleAssignment);
+
+        return () => {
+            socket.off('announcement-created', handleAnnouncement);
+            socket.off('material-created', handleMaterial);
+            socket.off('assignment-created', handleAssignment);
+        };
+    }, [socket, classrooms]);
 
     const fetchClassrooms = async () => {
         try {
@@ -107,16 +211,46 @@ const Dashboard = () => {
         navigate('/auth');
     };
 
-    const handlePhotoUpload = () => {
-        // Placeholder for photo upload logic
-        toast.promise(
-            new Promise(resolve => setTimeout(resolve, 1000)),
-            {
-                loading: 'Uploading photo...',
-                success: 'Photo updated!',
-                error: 'Could not upload photo.'
+    const handlePhotoUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const loadingToast = toast.loading('Uploading photo...');
+            const res = await fetch(`http://localhost:5001/api/users/${user.id}/avatar`, {
+                method: 'POST',
+                body: formData
+            });
+
+            let data;
+            try {
+                data = await res.json();
+            } catch (e) {
+                // Response was not JSON (e.g. 404 HTML)
+                toast.dismiss(loadingToast);
+                toast.error(`Server Error: ${res.status} (Please restart backend)`);
+                console.error("Non-JSON response:", res);
+                return;
             }
-        );
+
+            toast.dismiss(loadingToast);
+
+            if (res.ok) {
+                toast.success('Photo updated!');
+                // Update local user state
+                const updatedUser = { ...user, avatar: data.fileUrl };
+                setUser(updatedUser);
+                localStorage.setItem('user', JSON.stringify(updatedUser));
+            } else {
+                toast.error(data.msg || 'Upload failed');
+            }
+        } catch (err) {
+            console.error(err);
+            toast.error('Connection failed');
+        }
     };
 
     if (!user) return null;
@@ -139,6 +273,14 @@ const Dashboard = () => {
                 </div>
 
                 <div className="flex items-center gap-6">
+                    <NotificationBell
+                        notifications={notifications}
+                        onClear={() => setNotifications([])}
+                        onOpen={() => {
+                            setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+                        }}
+                    />
+
                     {/* Profile Dropdown */}
                     <div className="relative">
                         <button
@@ -147,28 +289,45 @@ const Dashboard = () => {
                         >
                             <div className="w-9 h-9 bg-gradient-to-br from-[rgb(var(--color-secondary))] to-[rgb(var(--color-accent))] rounded-full flex items-center justify-center text-white font-bold text-sm shadow-md relative overflow-hidden group">
                                 {user.name.charAt(0)}
-                                <div className="absolute inset-0 bg-black/40 hidden group-hover:flex items-center justify-center pointer-events-none">
-                                    <Camera size={12} />
-                                </div>
+
                             </div>
                             <div className="text-left hidden md:block">
                                 <p className="text-sm font-medium leading-none">{user.name}</p>
                                 <p className="text-xs text-[rgb(var(--text-secondary))] mt-1 capitalize">{user.role}</p>
                             </div>
-                            <MoreVertical size={16} className="text-[rgb(var(--text-secondary))]" />
+
                         </button>
 
                         {/* Dropdown Menu */}
                         {showProfileMenu && (
                             <div className="absolute right-0 top-full mt-2 w-64 glass-card rounded-2xl shadow-xl border border-white/10 p-2 transform origin-top-right animate-in fade-in zoom-in-95 duration-100 z-50">
-                                <div className="p-4 border-b border-white/5 mb-2 text-center">
-                                    <div className="w-16 h-16 mx-auto bg-gradient-to-br from-[rgb(var(--color-secondary))] to-[rgb(var(--color-accent))] rounded-full flex items-center justify-center text-2xl font-bold mb-3 relative group cursor-pointer" onClick={handlePhotoUpload}>
-                                        {user.name.charAt(0)}
-                                        <div className="absolute inset-0 bg-black/50 rounded-full opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                                            <Camera size={20} />
+                                <div className="p-4 border-b border-white/5 mb-2 text-center relative">
+                                    <div className="w-20 h-20 mx-auto rounded-full p-1 border-2 border-[rgb(var(--color-primary))] relative group">
+                                        <div className="w-full h-full rounded-full overflow-hidden bg-gradient-to-br from-[rgb(var(--color-secondary))] to-[rgb(var(--color-accent))] flex items-center justify-center text-2xl font-bold text-white relative">
+                                            {user.avatar ? (
+                                                <img src={`http://localhost:5001${user.avatar}`} alt="Profile" className="w-full h-full object-cover" />
+                                            ) : (
+                                                user.name.charAt(0)
+                                            )}
                                         </div>
+
+                                        {/* Pencil/Edit Icon */}
+                                        <button
+                                            onClick={() => document.getElementById('avatar-upload').click()}
+                                            className="absolute bottom-0 right-0 bg-white text-black p-1.5 rounded-full shadow-lg hover:scale-110 transition-transform cursor-pointer z-10"
+                                            title="Update Photo"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                                        </button>
+                                        <input
+                                            type="file"
+                                            id="avatar-upload"
+                                            className="hidden"
+                                            accept="image/*"
+                                            onChange={handlePhotoUpload}
+                                        />
                                     </div>
-                                    <p className="font-medium">{user.name}</p>
+                                    <p className="font-medium mt-3">{user.name}</p>
                                     <p className="text-xs text-[rgb(var(--text-secondary))]">{user.email}</p>
                                 </div>
                                 <button
@@ -220,7 +379,10 @@ const Dashboard = () => {
                                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[rgb(var(--text-secondary))]" size={20} />
                                 <input
                                     type="text"
-                                    placeholder="Search classes..."
+                                    placeholder="Search classes... (Press Enter)"
+                                    value={searchInput}
+                                    onChange={(e) => setSearchInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && setSearchQuery(searchInput)}
                                     className="pl-12 pr-6 py-4 rounded-xl bg-white/5 border border-white/10 focus:outline-none focus:ring-2 focus:ring-[rgb(var(--color-primary))] w-64 transition-all hover:bg-white/10"
                                 />
                             </div>
@@ -237,23 +399,31 @@ const Dashboard = () => {
                 </div>
 
                 {/* Classrooms Grid */}
-                {classrooms.length === 0 ? (
+                {classrooms.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.subject.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
                     <div className="text-center py-20 px-4 rounded-3xl border-2 border-dashed border-white/10 bg-white/5">
                         <div className="w-20 h-20 mx-auto bg-white/5 rounded-full flex items-center justify-center mb-6">
                             <BookOpen size={32} className="text-[rgb(var(--text-secondary))]" />
                         </div>
                         <h3 className="text-xl font-medium mb-2">No classrooms found</h3>
                         <p className="text-[rgb(var(--text-secondary))] mb-8 max-w-sm mx-auto">
-                            It looks like you haven't {user.role === 'teacher' ? 'created' : 'joined'} any classes yet.
-                            Get started by clicking the button above!
+                            {searchQuery ? "No matches found for your search." : (user.role === 'teacher' ? 'It looks like you haven\'t created any classes yet.' : 'It looks like you haven\'t joined any classes yet.')}
+                            {!searchQuery && " Get started by clicking the button above!"}
                         </p>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                        {classrooms.map((cls) => (
+                        {classrooms.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.subject.toLowerCase().includes(searchQuery.toLowerCase())).map((cls) => (
                             <div
                                 key={cls._id}
-                                onClick={() => navigate(`/classrooms/${cls._id}`)}
+                                onClick={() => {
+                                    // Clear badge when entering
+                                    setNewUpdates(prev => {
+                                        const next = { ...prev };
+                                        delete next[cls._id];
+                                        return next;
+                                    });
+                                    navigate(`/classrooms/${cls._id}`)
+                                }}
                                 className="glass-card rounded-2xl overflow-hidden cursor-pointer group flex flex-col h-full min-h-[220px]"
                             >
                                 {/* Card Header / Banner */}
@@ -263,7 +433,14 @@ const Dashboard = () => {
 
                                     <div className="relative z-10 flex justify-between items-start">
                                         <div className="max-w-[80%]">
-                                            <h3 className="font-bold text-xl text-white truncate leading-tight mb-1">{cls.name}</h3>
+                                            <h3 className="font-bold text-xl text-white truncate leading-tight mb-1 flex items-center gap-2">
+                                                {cls.name}
+                                                {newUpdates[cls._id] && (
+                                                    <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full animate-pulse shadow-sm">
+                                                        NEW
+                                                    </span>
+                                                )}
+                                            </h3>
                                             <p className="text-white/80 text-sm font-medium">{cls.subject}</p>
                                         </div>
 
@@ -284,7 +461,7 @@ const Dashboard = () => {
                                 <div className="p-6 flex-1 flex flex-col justify-between bg-white/[0.02]">
                                     <div className="flex justify-between items-center mb-6">
                                         <div className="flex items-center gap-2 text-[rgb(var(--text-secondary))] text-sm bg-white/5 px-3 py-1.5 rounded-lg border border-white/5">
-                                            <LogOut size={14} className="rotate-90" />
+                                            <span>Class code:</span>
                                             <span className="font-mono tracking-wider">{cls.code}</span>
                                         </div>
 
@@ -302,14 +479,16 @@ const Dashboard = () => {
                                     <div className="flex items-center justify-between mt-auto">
                                         <div className="flex -space-x-2 overflow-hidden">
                                             {/* Avatar Placeholders */}
-                                            {[...Array(3)].map((_, i) => (
-                                                <div key={i} className="inline-block h-8 w-8 rounded-full ring-2 ring-[rgb(var(--bg-card))] bg-gray-700/50 flex items-center justify-center text-xs text-white/50">
-                                                    <Users size={12} />
-                                                </div>
-                                            ))}
-                                            <div className="h-8 w-8 rounded-full ring-2 ring-[rgb(var(--bg-card))] bg-gray-700 flex items-center justify-center text-[10px] text-white/70 font-medium">
-                                                +12
+
+                                            <div className="relative inline-flex items-center justify-center h-10 w-10 rounded-full bg-white/5 border border-white/10 shadow-sm group-hover:scale-110 transition-transform">
+                                                <Users size={16} className="text-[rgb(var(--color-primary))]" />
+                                                <span className="absolute -bottom-1 -right-1 bg-gradient-to-r from-[rgb(var(--color-primary))] to-[rgb(var(--color-secondary))] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-lg border border-[#1c1c1e]">
+                                                    {cls.studentIds?.length || 0}
+                                                </span>
                                             </div>
+
+
+
                                         </div>
 
                                         <button className="text-[rgb(var(--color-primary))] group-hover:text-[rgb(var(--color-secondary))] font-semibold text-sm flex items-center gap-1 transition-colors">

@@ -5,6 +5,7 @@ import { SocketProvider } from './context/SocketContext';
 import Auth from './pages/Auth';
 import Dashboard from './pages/Dashboard';
 import Room from './pages/Room';
+import ResetPassword from './pages/ResetPassword';
 
 import ClassroomView from './pages/ClassroomView';
 
@@ -15,6 +16,7 @@ function App() {
         <Toaster position="top-right" />
         <Routes>
           <Route path="/auth" element={<Auth />} />
+          <Route path="/reset-password/:token" element={<ResetPassword />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/classrooms/:id" element={<ClassroomView />} />
           <Route path="/room/:roomId" element={<Room />} />

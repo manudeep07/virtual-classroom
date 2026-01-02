@@ -3,14 +3,6 @@ const router = express.Router();
 const Classroom = require('../models/Classroom');
 const User = require('../models/User');
 
-// Middleware to verify token (rudimentary, using the one from index.js if exported, or redefining)
-// For now, I'll assume the request comes with a user object or I need to implement auth middleware.
-// Ideally, we move the auth middleware to a separate file. For speed, I'll implement a basic check here
-// assuming the main server file doesn't globally apply it yet, or I'll ask to check `index.js`.
-// Actually, looking at previous steps, `index.js` just had routes. 
-// I will create a middleware helper or just verify inside the route for now if `req.user` isn't populated.
-// Wait, the previous turn added `jsonwebtoken`. 
-
 // Helper function to generate 6 digit code
 const generateCode = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();

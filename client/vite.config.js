@@ -16,6 +16,9 @@ export default defineConfig({
       },
     }),
   ],
+  server: {
+    allowedHosts: "c817fe6816bc.ngrok-free.app"
+  },
   define: {
     // Some libraries use global object which is not available in browser.
     // 'global': 'window', 

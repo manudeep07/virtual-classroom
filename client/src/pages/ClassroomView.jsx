@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { SocketContext } from '../context/SocketContext';
-import { Video, BookOpen, Users, LogOut, MessageSquare, Plus, Download, ChevronLeft, Send, Clock, FileText, MoreVertical, Trash2 } from 'lucide-react';
+import { Video, BookOpen, Users, LogOut, MessageSquare, Plus, Download, ChevronLeft, Send, Clock, FileText, MoreVertical, Trash2, Pencil, CheckCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const ClassroomView = () => {
@@ -22,6 +22,7 @@ const ClassroomView = () => {
     const [selectedAssignment, setSelectedAssignment] = useState(null);
     const [submissionContent, setSubmissionContent] = useState('');
     const [viewSubmissions, setViewSubmissions] = useState({});
+    const [submittedAssignments, setSubmittedAssignments] = useState({}); // Map of assignmentId -> boolean
 
     // Forms
     const [newAssignment, setNewAssignment] = useState({ title: '', description: '', dueDate: '' });
@@ -34,6 +35,10 @@ const ClassroomView = () => {
     const [announcements, setAnnouncements] = useState([]);
     const [newAnnouncement, setNewAnnouncement] = useState('');
     const [isActiveAnnouncementInput, setIsActiveAnnouncementInput] = useState(false);
+    const [editingAnnouncement, setEditingAnnouncement] = useState(null);
+    const [editContent, setEditContent] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isCreating, setIsCreating] = useState(false); // Shared loading state for creating assignment/material
 
     // --- Fetchers ---
     const fetchClassroom = async () => {
@@ -58,7 +63,32 @@ const ClassroomView = () => {
     const fetchAssignments = async () => {
         try {
             const res = await fetch(`http://localhost:5001/api/classrooms/${id}/assignments`);
-            if (res.ok) setAssignments(await res.json());
+            if (res.ok) {
+                const data = await res.json();
+                setAssignments(data);
+
+                // If student, fetch their submissions to check status
+                if (user && user.role === 'student') {
+                    // This is a naive N+1 approach but sufficient for this scale. 
+                    // Better: a separate endpoint returning all submission IDs for this student in this class.
+                    // For now, let's use a Promise.all to check specific status or just rely on the error.
+                    // Actually, let's stick to the error handling for simplicity and robustness first, 
+                    // OR implementing a 'submission status' map.
+
+                    // Let's create a map of submitted assignment IDs
+                    const statusMap = {};
+                    await Promise.all(data.map(async (assign) => {
+                        try {
+                            const subRes = await fetch(`http://localhost:5001/api/submissions/${assign._id}/my-submission?studentId=${user.id}`);
+                            if (subRes.ok) {
+                                const sub = await subRes.json();
+                                if (sub) statusMap[assign._id] = true;
+                            }
+                        } catch (e) { console.error(e); }
+                    }));
+                    setSubmittedAssignments(statusMap);
+                }
+            }
         } catch (err) { console.error(err); }
     };
 
@@ -81,11 +111,38 @@ const ClassroomView = () => {
                 setClassroom(prev => prev ? { ...prev, isActive } : prev);
             });
 
+            // Real-time assignment updates
+            socket.on('assignment-created', (newAssignment) => {
+                setAssignments(prev => [newAssignment, ...prev]);
+                // If current user is student, we might want to check submission status (which is null initially)
+            });
+
+            socket.on('assignment-deleted', (assignmentId) => {
+                setAssignments(prev => prev.filter(a => a._id !== assignmentId));
+            });
+
+            socket.on('material-created', (newMaterial) => {
+                setMaterials(prev => [newMaterial, ...prev]);
+            });
+
             return () => {
                 socket.off('class-status-changed');
+                socket.off('assignment-created');
+                socket.off('assignment-deleted');
+                socket.off('material-created');
             };
         }
     }, [id, user, socket]);
+
+    // Helper to format Cloudinary URLs for download
+    const getDownloadUrl = (url) => {
+        if (!url) return '#';
+        if (url.startsWith('http')) {
+            console.log('Download URL:', url); // Debugging
+            return url;
+        }
+        return `http://localhost:5001${url}`;
+    };
 
     // --- Handlers ---
 
@@ -102,6 +159,35 @@ const ClassroomView = () => {
                 setIsActiveAnnouncementInput(false);
                 fetchAnnouncements();
                 toast.success('Announcement posted');
+            }
+        } catch (err) { console.error(err); }
+    };
+
+    const handleDeleteAnnouncement = async (annId) => {
+        if (!window.confirm('Delete this announcement?')) return;
+        try {
+            const res = await fetch(`http://localhost:5001/api/announcements/${annId}`, {
+                method: 'DELETE'
+            });
+            if (res.ok) {
+                toast.success('Announcement deleted');
+                fetchAnnouncements();
+            }
+        } catch (err) { console.error(err); }
+    };
+
+    const handleUpdateAnnouncement = async (annId) => {
+        if (!editContent.trim()) return;
+        try {
+            const res = await fetch(`http://localhost:5001/api/announcements/${annId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: editContent })
+            });
+            if (res.ok) {
+                toast.success('Announcement updated');
+                setEditingAnnouncement(null);
+                fetchAnnouncements();
             }
         } catch (err) { console.error(err); }
     };
@@ -128,8 +214,24 @@ const ClassroomView = () => {
         navigate(`/room/${id}`);
     };
 
+    const handleDeleteAssignment = async (assignId) => {
+        if (!window.confirm('Delete this assignment? This will also delete all student submissions.')) return;
+        try {
+            const res = await fetch(`http://localhost:5001/api/classrooms/${id}/assignments/${assignId}`, {
+                method: 'DELETE'
+            });
+            if (res.ok) {
+                toast.success('Assignment deleted');
+                // UI update handled by socket, but we can do it optimistically too if needed
+            } else {
+                toast.error('Failed to delete assignment');
+            }
+        } catch (err) { console.error(err); }
+    };
+
     const handleCreateAssignment = async (e) => {
         e.preventDefault();
+        setIsCreating(true);
         try {
             const formData = new FormData();
             formData.append('title', newAssignment.title);
@@ -147,12 +249,20 @@ const ClassroomView = () => {
                 setNewAssignment({ title: '', description: '', dueDate: '' });
                 setAssignmentFile(null);
                 toast.success('Assignment created');
+            } else {
+                const data = await res.json();
+                toast.error(data.message || 'Failed to create assignment');
             }
-        } catch (err) { console.error(err); }
+        } catch (err) {
+            console.error(err);
+            toast.error('Error creating assignment');
+        }
+        finally { setIsCreating(false); }
     };
 
     const handleCreateMaterial = async (e) => {
         e.preventDefault();
+        setIsCreating(true);
         try {
             const formData = new FormData();
             formData.append('title', newMaterial.title);
@@ -172,10 +282,12 @@ const ClassroomView = () => {
                 toast.success('Material added');
             }
         } catch (err) { console.error(err); }
+        finally { setIsCreating(false); }
     };
 
     const handleSubmitAssignment = async (e) => {
         e.preventDefault();
+        setIsSubmitting(true);
         try {
             const formData = new FormData();
             formData.append('studentId', user.id);
@@ -189,12 +301,17 @@ const ClassroomView = () => {
             if (res.ok) {
                 toast.success('Assignment submitted!');
                 setShowSubmissionModal(false);
+                // Update local state to reflect submission immediately
+                setSubmittedAssignments(prev => ({ ...prev, [selectedAssignment._id]: true }));
             } else {
-                toast.error('Failed to submit');
+                const data = await res.json();
+                toast.error(data.message || 'Failed to submit');
             }
         } catch (err) {
             console.error(err);
             toast.error('Error submitting');
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -231,8 +348,8 @@ const ClassroomView = () => {
                             onClick={() => navigate(`/room/${id}`)}
                             disabled={!classroom.isActive}
                             className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-all ${classroom.isActive
-                                    ? 'bg-green-500 hover:bg-green-600 text-white shadow-lg shadow-green-500/20 animate-pulse'
-                                    : 'bg-white/10 text-[rgb(var(--text-secondary))] cursor-not-allowed'
+                                ? 'bg-green-500 hover:bg-green-600 text-white shadow-lg shadow-green-500/20 animate-pulse'
+                                : 'bg-white/10 text-[rgb(var(--text-secondary))] cursor-not-allowed'
                                 }`}
                         >
                             <Video size={18} />
@@ -307,7 +424,7 @@ const ClassroomView = () => {
                                                     onChange={(e) => setNewAnnouncement(e.target.value)}
                                                     onFocus={() => setIsActiveAnnouncementInput(true)}
                                                     placeholder="Announce something to your class..."
-                                                    className="w-full bg-transparent border-none focus:ring-0 text-white placeholder-white/30 resize-none min-h-[40px]"
+                                                    className="w-full bg-transparent border-none outline-none focus:ring-0 text-white placeholder-white/30 resize-none min-h-[40px]"
                                                     rows={isActiveAnnouncementInput ? 3 : 1}
                                                 />
                                                 {isActiveAnnouncementInput && (
@@ -358,39 +475,83 @@ const ClassroomView = () => {
                                             <FileText className="text-[rgb(var(--color-accent))]" /> Assignments
                                         </h3>
                                         <div className="space-y-4">
-                                            {assignments.map(assign => (
-                                                <div key={assign._id} className="glass-card p-6 rounded-2xl group hover:border-[rgb(var(--color-primary))]/50">
-                                                    <div className="flex justify-between items-start">
-                                                        <div className="flex gap-4">
-                                                            <div className="p-3 bg-[rgb(var(--color-primary))]/20 rounded-xl text-[rgb(var(--color-primary))] h-fit">
-                                                                <FileText size={24} />
+                                            {assignments.map(assign => {
+                                                // Check if student has submitted (requires logic update)
+                                                // For now, we will handle the "Already Submitted" check when they click "Submit"
+                                                // Ideally, we'd fetch submission status with the assignments list or separately.
+                                                // Let's rely on the backend 400 error for now to block duplicate submissions,
+                                                // OR we can make a small fetch for "my-submission" when student views.
+                                                // Simpler Approach for this iteration: Just blocking via backend error as established, 
+                                                // but let's add the Teacher View Button.
+
+                                                return (
+                                                    <div key={assign._id} className="glass-card p-6 rounded-2xl group hover:border-[rgb(var(--color-primary))]/50">
+                                                        <div className="flex justify-between items-start">
+                                                            <div className="flex gap-4">
+                                                                <div className="p-3 bg-[rgb(var(--color-primary))]/20 rounded-xl text-[rgb(var(--color-primary))] h-fit">
+                                                                    <FileText size={24} />
+                                                                </div>
+                                                                <div>
+                                                                    <h4 className="text-lg font-bold text-white group-hover:text-[rgb(var(--color-primary))] transition-colors">{assign.title}</h4>
+                                                                    <p className="text-[rgb(var(--text-secondary))] mt-1 text-sm">{assign.description}</p>
+                                                                    {assign.dueDate && (
+                                                                        <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-red-400 bg-red-500/10 px-2 py-1 rounded w-fit">
+                                                                            <Clock size={12} /> Due: {new Date(assign.dueDate).toLocaleDateString()}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
                                                             </div>
-                                                            <div>
-                                                                <h4 className="text-lg font-bold text-white group-hover:text-[rgb(var(--color-primary))] transition-colors">{assign.title}</h4>
-                                                                <p className="text-[rgb(var(--text-secondary))] mt-1 text-sm">{assign.description}</p>
-                                                                {assign.dueDate && (
-                                                                    <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-red-400 bg-red-500/10 px-2 py-1 rounded w-fit">
-                                                                        <Clock size={12} /> Due: {new Date(assign.dueDate).toLocaleDateString()}
+
+                                                            <div className="flex flex-col items-end gap-2">
+                                                                {user.role === 'student' && (
+                                                                    submittedAssignments[assign._id] ? (
+                                                                        <button disabled className="px-4 py-2 bg-green-500/10 border border-green-500/20 rounded-lg text-sm text-green-500 font-bold cursor-not-allowed flex items-center gap-1">
+                                                                            <CheckCircle size={16} /> Submitted
+                                                                        </button>
+                                                                    ) : (
+                                                                        <button onClick={() => { setSelectedAssignment(assign); setShowSubmissionModal(true); }} className="px-4 py-2 border border-white/10 hover:bg-white/5 rounded-lg text-sm text-white transition-colors">
+                                                                            Submit
+                                                                        </button>
+                                                                    )
+                                                                )}
+                                                                {user.role === 'teacher' && (
+                                                                    <div className="flex gap-2">
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                setViewSubmissions({ show: true, assignmentTitle: assign.title, data: null });
+                                                                                try {
+                                                                                    const res = await fetch(`http://localhost:5001/api/submissions/${assign._id}/all`);
+                                                                                    if (res.ok) {
+                                                                                        const data = await res.json();
+                                                                                        setViewSubmissions({ show: true, assignmentTitle: assign.title, data });
+                                                                                    }
+                                                                                } catch (e) {
+                                                                                    toast.error("Failed to load submissions");
+                                                                                }
+                                                                            }}
+                                                                            className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-[rgb(var(--color-primary))] font-bold transition-colors flex items-center gap-2"
+                                                                        >
+                                                                            <Users size={16} /> Submissions
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => handleDeleteAssignment(assign._id)}
+                                                                            className="px-3 py-2 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 rounded-lg text-sm text-red-500 transition-colors"
+                                                                            title="Delete Assignment"
+                                                                        >
+                                                                            <Trash2 size={16} />
+                                                                        </button>
                                                                     </div>
+                                                                )}
+                                                                {assign.fileUrl && (
+                                                                    <a href={getDownloadUrl(assign.fileUrl)} target="_blank" rel="noopener noreferrer" className="p-2 text-[rgb(var(--color-secondary))] hover:bg-white/5 rounded-lg" title="Download Attachment">
+                                                                        <Download size={20} />
+                                                                    </a>
                                                                 )}
                                                             </div>
                                                         </div>
-
-                                                        <div className="flex flex-col items-end gap-2">
-                                                            {user.role === 'student' && (
-                                                                <button onClick={() => { setSelectedAssignment(assign); setShowSubmissionModal(true); }} className="px-4 py-2 border border-white/10 hover:bg-white/5 rounded-lg text-sm text-white transition-colors">
-                                                                    Submit
-                                                                </button>
-                                                            )}
-                                                            {assign.fileUrl && (
-                                                                <a href={`http://localhost:5001${assign.fileUrl}`} target="_blank" className="p-2 text-[rgb(var(--color-secondary))] hover:bg-white/5 rounded-lg" title="Download Attachment">
-                                                                    <Download size={20} />
-                                                                </a>
-                                                            )}
-                                                        </div>
                                                     </div>
-                                                </div>
-                                            ))}
+                                                )
+                                            })}
                                             {assignments.length === 0 && <p className="text-[rgb(var(--text-secondary))] italic px-2">No assignments posted yet.</p>}
                                         </div>
                                     </div>
@@ -415,11 +576,10 @@ const ClassroomView = () => {
                                                             </div>
                                                         </div>
                                                         {mat.fileUrl && (
-                                                            <a href={`http://localhost:5001${mat.fileUrl}`} target="_blank" className="p-2 text-[rgb(var(--color-secondary))] hover:bg-white/5 rounded-lg">
+                                                            <a href={getDownloadUrl(mat.fileUrl)} target="_blank" rel="noopener noreferrer" className="p-2 text-[rgb(var(--color-secondary))] hover:bg-white/5 rounded-lg">
                                                                 <Download size={20} />
                                                             </a>
-                                                        )}
-                                                    </div>
+                                                        )}                                          </div>
                                                 </div>
                                             ))}
                                             {materials.length === 0 && <p className="text-[rgb(var(--text-secondary))] italic px-2">No materials posted yet.</p>}
@@ -489,15 +649,60 @@ const ClassroomView = () => {
                                         </div>
                                     ) : (
                                         announcements.map(ann => (
-                                            <div key={ann._id} className="bg-white/5 rounded-xl p-4 border border-white/5 hover:bg-white/10 transition-colors">
+                                            <div key={ann._id} className="bg-white/5 rounded-xl p-4 border border-white/5 hover:bg-white/10 transition-colors group">
                                                 <div className="flex items-center gap-2 mb-2">
                                                     <div className="w-6 h-6 rounded-full bg-[rgb(var(--color-primary))] flex items-center justify-center text-[10px] text-white font-bold">
                                                         {ann.teacherId?.name?.charAt(0)}
                                                     </div>
                                                     <span className="text-xs font-bold text-white truncate">{ann.teacherId?.name}</span>
                                                     <span className="text-[10px] text-[rgb(var(--text-secondary))] ml-auto">{new Date(ann.createdAt).toLocaleDateString()}</span>
+
+                                                    {user.role === 'teacher' && (
+                                                        <div className="flex items-center gap-1 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                            <button
+                                                                onClick={() => { setEditingAnnouncement(ann._id); setEditContent(ann.content); }}
+                                                                className="p-1 hover:bg-white/10 rounded text-[rgb(var(--text-secondary))] hover:text-white cursor-pointer"
+                                                                title="Edit"
+                                                            >
+                                                                <Pencil size={12} />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDeleteAnnouncement(ann._id)}
+                                                                className="p-1 hover:bg-red-500/20 rounded text-[rgb(var(--text-secondary))] hover:text-red-400 cursor-pointer"
+                                                                title="Delete"
+                                                            >
+                                                                <Trash2 size={12} />
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap">{ann.content}</p>
+
+                                                {editingAnnouncement === ann._id ? (
+                                                    <div className="mt-2">
+                                                        <textarea
+                                                            value={editContent}
+                                                            onChange={(e) => setEditContent(e.target.value)}
+                                                            className="w-full bg-black/20 rounded-lg p-2 text-sm text-white resize-none border border-white/10 focus:border-[rgb(var(--color-primary))] outline-none"
+                                                            rows={3}
+                                                        />
+                                                        <div className="flex justify-end gap-2 mt-2">
+                                                            <button
+                                                                onClick={() => setEditingAnnouncement(null)}
+                                                                className="text-xs px-2 py-1 hover:bg-white/10 rounded text-gray-400"
+                                                            >
+                                                                Cancel
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleUpdateAnnouncement(ann._id)}
+                                                                className="text-xs px-2 py-1 bg-[rgb(var(--color-primary))] hover:bg-[rgb(var(--color-secondary))] rounded text-white font-bold"
+                                                            >
+                                                                Save
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap">{ann.content}</p>
+                                                )}
                                             </div>
                                         ))
                                     )}
@@ -516,10 +721,27 @@ const ClassroomView = () => {
                         <form onSubmit={handleCreateAssignment} className="space-y-4">
                             <input type="text" placeholder="Title" required className="w-full px-4 py-3 rounded-xl input-glass" value={newAssignment.title} onChange={e => setNewAssignment({ ...newAssignment, title: e.target.value })} />
                             <textarea placeholder="Description" className="w-full px-4 py-3 rounded-xl input-glass" value={newAssignment.description} onChange={e => setNewAssignment({ ...newAssignment, description: e.target.value })} />
-                            <input type="date" className="w-full px-4 py-3 rounded-xl input-glass" value={newAssignment.dueDate} onChange={e => setNewAssignment({ ...newAssignment, dueDate: e.target.value })} />
+                            <input type="date" required className="w-full px-4 py-3 rounded-xl input-glass" value={newAssignment.dueDate} onChange={e => setNewAssignment({ ...newAssignment, dueDate: e.target.value })} />
+
+                            <div className="space-y-2">
+                                <label className="text-sm text-[rgb(var(--text-secondary))] ml-1">Attachment (Optional)</label>
+                                <input
+                                    type="file"
+                                    onChange={e => setAssignmentFile(e.target.files[0])}
+                                    className="w-full text-sm text-[rgb(var(--text-secondary))] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-[rgb(var(--color-primary))] file:text-white hover:file:bg-[rgb(var(--color-secondary))]"
+                                />
+                            </div>
+
                             <div className="flex justify-end gap-2 mt-4">
-                                <button type="button" onClick={() => setShowAssignmentModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white">Cancel</button>
-                                <button type="submit" className="px-4 py-2 btn-primary rounded-lg text-white font-bold">Create</button>
+                                <button type="button" onClick={() => setShowAssignmentModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white" disabled={isCreating}>Cancel</button>
+                                <button type="submit" className="px-4 py-2 btn-primary rounded-lg text-white font-bold flex items-center gap-2" disabled={isCreating}>
+                                    {isCreating ? (
+                                        <>
+                                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                            Creating...
+                                        </>
+                                    ) : 'Create'}
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -535,9 +757,26 @@ const ClassroomView = () => {
                             <input type="text" placeholder="Title" required className="w-full px-4 py-3 rounded-xl input-glass" value={newMaterial.title} onChange={e => setNewMaterial({ ...newMaterial, title: e.target.value })} />
                             <textarea placeholder="Description" className="w-full px-4 py-3 rounded-xl input-glass" value={newMaterial.description} onChange={e => setNewMaterial({ ...newMaterial, description: e.target.value })} />
                             <input type="text" placeholder="Link (http://...)" className="w-full px-4 py-3 rounded-xl input-glass" value={newMaterial.link} onChange={e => setNewMaterial({ ...newMaterial, link: e.target.value })} />
+
+                            <div className="space-y-2">
+                                <label className="text-sm text-[rgb(var(--text-secondary))] ml-1">Attachment (Optional)</label>
+                                <input
+                                    type="file"
+                                    onChange={e => setMaterialFile(e.target.files[0])}
+                                    className="w-full text-sm text-[rgb(var(--text-secondary))] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-[rgb(var(--color-secondary))] file:text-white hover:file:bg-[rgb(var(--color-secondary))]/80"
+                                />
+                            </div>
+
                             <div className="flex justify-end gap-2 mt-4">
-                                <button type="button" onClick={() => setShowMaterialModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white">Cancel</button>
-                                <button type="submit" className="px-4 py-2 btn-primary rounded-lg text-white font-bold">Add</button>
+                                <button type="button" onClick={() => setShowMaterialModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white" disabled={isCreating}>Cancel</button>
+                                <button type="submit" className="px-4 py-2 btn-primary rounded-lg text-white font-bold flex items-center gap-2" disabled={isCreating}>
+                                    {isCreating ? (
+                                        <>
+                                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                            Adding...
+                                        </>
+                                    ) : 'Add'}
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -552,12 +791,72 @@ const ClassroomView = () => {
                         <p className="text-sm text-[rgb(var(--text-secondary))] mb-4">{selectedAssignment?.title}</p>
                         <form onSubmit={handleSubmitAssignment} className="space-y-4">
                             <textarea placeholder="Type your response here..." className="w-full px-4 py-3 rounded-xl input-glass min-h-[120px]" value={submissionContent} onChange={e => setSubmissionContent(e.target.value)} />
-                            <input type="file" onChange={e => setSubmissionFile(e.target.files[0])} className="w-full text-sm text-[rgb(var(--text-secondary))]" />
+                            <input type="file" onChange={e => setSubmissionFile(e.target.files[0])} className="w-full text-sm text-[rgb(var(--text-secondary))] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-[rgb(var(--color-primary))] file:text-white hover:file:bg-[rgb(var(--color-secondary))]" />
                             <div className="flex justify-end gap-2 mt-4">
-                                <button type="button" onClick={() => setShowSubmissionModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white">Cancel</button>
-                                <button type="submit" className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-white font-bold">Turn In</button>
+                                <button type="button" onClick={() => setShowSubmissionModal(false)} className="px-4 py-2 hover:bg-white/10 rounded-lg text-white" disabled={isSubmitting}>Cancel</button>
+                                <button type="submit" className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-white font-bold flex items-center gap-2" disabled={isSubmitting}>
+                                    {isSubmitting ? (
+                                        <>
+                                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                            Submitting...
+                                        </>
+                                    ) : 'Submit'}
+                                </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* View Submissions Modal (Teacher) */}
+            {viewSubmissions.show && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+                    <div className="glass-panel w-full max-w-2xl p-6 rounded-2xl shadow-2xl bg-[rgb(var(--bg-card))] h-[80vh] flex flex-col">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                                <Users size={20} className="text-[rgb(var(--color-primary))]" />
+                                Submissions: {viewSubmissions.assignmentTitle}
+                            </h3>
+                            <button onClick={() => setViewSubmissions({ ...viewSubmissions, show: false })} className="p-2 hover:bg-white/10 rounded-lg text-white">
+                                <LogOut size={20} />
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto custom-scrollbar space-y-4 pr-2">
+                            {!viewSubmissions.data ? (
+                                <div className="text-center py-10 text-[rgb(var(--text-secondary))]">Loading...</div>
+                            ) : viewSubmissions.data.length === 0 ? (
+                                <div className="text-center py-10 text-[rgb(var(--text-secondary))]">No submissions yet.</div>
+                            ) : (
+                                viewSubmissions.data.map(sub => (
+                                    <div key={sub._id} className="bg-white/5 rounded-xl p-4 border border-white/5 hover:bg-white/10 transition-colors">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[rgb(var(--color-secondary))] to-purple-600 flex items-center justify-center font-bold text-white text-xs">
+                                                    {sub.studentId?.name?.charAt(0)}
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-bold text-white">{sub.studentId?.name}</p>
+                                                    <p className="text-xs text-[rgb(var(--text-secondary))]">{sub.studentId?.email}</p>
+                                                </div>
+                                            </div>
+                                            <span className="text-[10px] bg-white/10 px-2 py-1 rounded text-[rgb(var(--text-secondary))]">
+                                                {new Date(sub.submittedAt).toLocaleString()}
+                                            </span>
+                                        </div>
+
+                                        <div className="ml-11 space-y-2">
+                                            {sub.content && <p className="text-sm text-gray-200 bg-black/20 p-3 rounded-lg">{sub.content}</p>}
+                                            {sub.fileUrl && (
+                                                <a href={getDownloadUrl(sub.fileUrl)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-xs font-bold text-[rgb(var(--color-primary))] hover:underline bg-[rgb(var(--color-primary))]/10 px-3 py-2 rounded-lg transition-colors">
+                                                    <Download size={14} /> Download Attachment
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                        </div>
                     </div>
                 </div>
             )}

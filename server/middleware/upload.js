@@ -3,15 +3,18 @@ const path = require('path');
 const fs = require('fs');
 
 // Ensure uploads directory exists
-const uploadDir = 'uploads';
+const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir);
+    fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Set storage engine
+// Configure Storage
 const storage = multer.diskStorage({
-    destination: './uploads/',
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/');
+    },
     filename: function (req, file, cb) {
+        // Create unique filename: fieldname-timestamp.ext
         cb(null, file.fieldname + '-' + Date.now() + path.extname(file.originalname));
     }
 });
@@ -19,7 +22,7 @@ const storage = multer.diskStorage({
 // Init upload
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 10000000 }, // 10MB limit
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
     fileFilter: function (req, file, cb) {
         checkFileType(file, cb);
     }
@@ -29,15 +32,16 @@ const upload = multer({
 function checkFileType(file, cb) {
     // Allowed ext
     const filetypes = /jpeg|jpg|png|gif|pdf|doc|docx|ppt|pptx|txt|zip|rar|mp4|webm/;
-    // Check ext
+    // Check ext matches the end of the original filename
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    // Check mime
-    // const mimetype = filetypes.test(file.mimetype); // Mimetypes can be tricky, extname is usually enough for this level
+
+    // Also check mimetype for safety if possible, but extname is often sufficient for basic check
+    // const mimetype = filetypes.test(file.mimetype);
 
     if (extname) {
         return cb(null, true);
     } else {
-        cb('Error: Files Only!');
+        cb(new Error('Error: Files Only! (Invalid Type)'));
     }
 }
 

@@ -1,13 +1,15 @@
 import React, { useState, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SocketContext } from '../context/SocketContext';
-import { BookOpen, ArrowRight, User, Mail, Lock, CheckCircle } from 'lucide-react';
+import { BookOpen, ArrowRight, User, Mail, Lock, CheckCircle, Eye, EyeOff } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const Auth = () => {
     const navigate = useNavigate();
     const { setUser } = useContext(SocketContext);
-    const [isLogin, setIsLogin] = useState(true);
+    const [showPassword, setShowPassword] = useState(false);
+    const [view, setView] = useState('login'); // login, register, forgot
+
     const [formData, setFormData] = useState({
         name: '',
         email: '',
@@ -23,12 +25,21 @@ const Auth = () => {
     const onSubmit = async e => {
         e.preventDefault();
         setLoading(true);
-        const url = isLogin
-            ? 'http://localhost:5001/api/auth/login'
-            : 'http://localhost:5001/api/auth/register';
+        let url;
+        let body;
+
+        if (view === 'login') {
+            url = 'http://localhost:5001/api/auth/login';
+            body = { email, password };
+        } else if (view === 'forgot') {
+            url = 'http://localhost:5001/api/auth/forgot-password';
+            body = { email };
+        } else {
+            url = 'http://localhost:5001/api/auth/register';
+            body = { name, email, password, role };
+        }
 
         try {
-            const body = isLogin ? { email, password } : { name, email, password, role };
             const res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -38,13 +49,17 @@ const Auth = () => {
             const data = await res.json();
 
             if (res.ok) {
+                if (view === 'forgot') {
+                    toast.success('Reset link sent to console!');
+                    return;
+                }
                 localStorage.setItem('token', data.token);
                 localStorage.setItem('user', JSON.stringify(data.user));
                 setUser(data.user);
-                toast.success(isLogin ? 'Welcome back!' : 'Account created successfully!');
+                toast.success(view === 'login' ? 'Welcome back!' : 'Account created!');
                 navigate('/dashboard');
             } else {
-                toast.error(data.msg || 'Authentication failed');
+                toast.error(data.msg || data.message || 'Authentication failed');
             }
         } catch (err) {
             console.error(err);
@@ -108,13 +123,19 @@ const Auth = () => {
                 {/* Right Side - Form */}
                 <div className="w-full lg:w-1/2 p-8 md:p-12 flex flex-col justify-center relative">
                     <div className="max-w-md mx-auto w-full">
-                        <h2 className="text-3xl font-bold mb-2 text-white">{isLogin ? 'Sign In' : 'Create Account'}</h2>
+                        <h2 className="text-3xl font-bold mb-2 text-white">
+                            {view === 'login' ? 'Sign In' : view === 'register' ? 'Create Account' : 'Reset Password'}
+                        </h2>
                         <p className="text-gray-400 mb-8">
-                            {isLogin ? 'Enter your details to access your account' : 'Get started with your free account today'}
+                            {view === 'login'
+                                ? 'Enter your details to access your account'
+                                : view === 'forgot'
+                                    ? 'Enter your email to receive instructions'
+                                    : 'Get started with your free account today'}
                         </p>
 
                         <form onSubmit={onSubmit} className="space-y-4">
-                            {!isLogin && (
+                            {view === 'register' && (
                                 <div className="space-y-1">
                                     <label className="text-xs font-medium text-gray-400 ml-1">Full Name</label>
                                     <div className="relative">
@@ -148,29 +169,49 @@ const Auth = () => {
                                 </div>
                             </div>
 
-                            <div className="space-y-1">
-                                <label className="text-xs font-medium text-gray-400 ml-1">Password</label>
-                                <div className="relative">
-                                    <Lock className="absolute left-3 top-3 text-gray-500" size={18} />
-                                    <input
-                                        type="password"
-                                        name="password"
-                                        value={password}
-                                        onChange={onChange}
-                                        placeholder="••••••••"
-                                        className="w-full pl-10 pr-4 py-3 rounded-xl input-glass focus:ring-2 focus:ring-[rgb(var(--color-primary))]"
-                                        required
-                                        minLength="6"
-                                    />
+                            {view !== 'forgot' && (
+                                <div className="space-y-1">
+                                    <label className="text-xs font-medium text-gray-400 ml-1">Password</label>
+                                    <div className="relative">
+                                        <Lock className="absolute left-3 top-3 text-gray-500" size={18} />
+                                        <input
+                                            type={showPassword ? 'text' : 'password'}
+                                            name="password"
+                                            value={password}
+                                            onChange={onChange}
+                                            placeholder="••••••••"
+                                            className="w-full pl-10 pr-12 py-3 rounded-xl input-glass focus:ring-2 focus:ring-[rgb(var(--color-primary))]"
+                                            required
+                                            minLength="6"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowPassword(!showPassword)}
+                                            className="absolute right-3 top-3 text-gray-400 hover:text-white transition-colors"
+                                        >
+                                            {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                                        </button>
+                                    </div>
+                                    {view === 'login' && (
+                                        <div className="flex justify-end pt-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => setView('forgot')}
+                                                className="text-xs text-[rgb(var(--color-primary))] hover:text-white transition-colors"
+                                            >
+                                                Forgot Password?
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
-                            </div>
+                            )}
 
-                            {!isLogin && (
+                            {view === 'register' && (
                                 <div className="grid grid-cols-2 gap-4 pt-2">
                                     {['student', 'teacher'].map((r) => (
                                         <label key={r} className={`cursor-pointer border rounded-xl p-3 flex items-center justify-center gap-2 transition-all ${role === r
-                                                ? 'bg-[rgb(var(--color-primary))]/20 border-[rgb(var(--color-primary))] text-white'
-                                                : 'border-white/10 text-gray-400 hover:bg-white/5'
+                                            ? 'bg-[rgb(var(--color-primary))]/20 border-[rgb(var(--color-primary))] text-white'
+                                            : 'border-white/10 text-gray-400 hover:bg-white/5'
                                             }`}>
                                             <input
                                                 type="radio"
@@ -195,26 +236,44 @@ const Auth = () => {
                                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
                                 ) : (
                                     <>
-                                        {isLogin ? 'Sign In' : 'Sign Up'}
+                                        {view === 'login' ? 'Sign In' : view === 'register' ? 'Sign Up' : 'Send Link'}
                                         <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
                                     </>
                                 )}
                             </button>
                         </form>
 
-                        <div className="mt-8 text-center">
-                            <p className="text-gray-400 text-sm">
-                                {isLogin ? "Don't have an account?" : "Already have an account?"}{' '}
+                        <div className="mt-8 text-center text-sm text-gray-400 space-y-2">
+                            {view === 'login' && (
+                                <p>
+                                    Don't have an account?{' '}
+                                    <button
+                                        onClick={() => setView('register')}
+                                        className="text-[rgb(var(--color-secondary))] hover:text-white font-medium transition-colors"
+                                    >
+                                        Register now
+                                    </button>
+                                </p>
+                            )}
+                            {view === 'register' && (
+                                <p>
+                                    Already have an account?{' '}
+                                    <button
+                                        onClick={() => setView('login')}
+                                        className="text-[rgb(var(--color-secondary))] hover:text-white font-medium transition-colors"
+                                    >
+                                        Sign In
+                                    </button>
+                                </p>
+                            )}
+                            {view === 'forgot' && (
                                 <button
-                                    onClick={() => {
-                                        setIsLogin(!isLogin);
-                                        setFormData({ name: '', email: '', password: '', role: 'student' });
-                                    }}
-                                    className="text-[rgb(var(--color-secondary))] hover:text-white font-medium transition-colors ml-1"
+                                    onClick={() => setView('login')}
+                                    className="text-gray-400 hover:text-white transition-colors"
                                 >
-                                    {isLogin ? 'Register now' : 'Sign In'}
+                                    Back to Sign In
                                 </button>
-                            </p>
+                            )}
                         </div>
                     </div>
                 </div>

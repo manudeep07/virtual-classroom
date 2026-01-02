@@ -10,6 +10,7 @@ const assignmentSchema = new mongoose.Schema({
     },
     dueDate: {
         type: Date,
+        required: true,
     },
     fileUrl: {
         type: String, // Path to uploaded file

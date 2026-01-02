@@ -19,6 +19,12 @@ const userSchema = new mongoose.Schema({
         enum: ['teacher', 'student'],
         default: 'student'
     },
+    avatar: {
+        type: String,
+        default: ''
+    },
+    resetPasswordToken: String,
+    resetPasswordExpire: Date,
     createdAt: {
         type: Date,
         default: Date.now

@@ -6,12 +6,12 @@ const SocketContext = createContext();
 const socket = io('http://localhost:5001');
 
 const SocketProvider = ({ children }) => {
-    const [user, setUser] = useState(null);
+    const [user, setUser] = useState(() => {
+        const storedUser = localStorage.getItem('user');
+        return storedUser ? JSON.parse(storedUser) : null;
+    });
 
     useEffect(() => {
-        const storedUser = localStorage.getItem('user');
-        if (storedUser) setUser(JSON.parse(storedUser));
-
         socket.on('connect', () => {
             console.log('Connected to socket server:', socket.id);
         });

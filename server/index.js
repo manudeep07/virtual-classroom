@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { Server } = require('socket.io');
+const crypto = require('crypto');
 
 dotenv.config();
 
@@ -15,6 +16,8 @@ const io = new Server(server, {
     methods: ['GET', 'POST']
   }
 });
+
+app.set('io', io); // Make io accessible in routes
 
 app.use(cors());
 app.use(express.json());
@@ -31,13 +34,6 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('./models/User');
 const Classroom = require('./models/Classroom');
-
-// ... (previous imports)
-
-// Middleware to verify Token (optional for now, but good to have)
-const auth = (req, res, next) => {
-  // ...
-};
 
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
@@ -83,6 +79,67 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Forgot Password
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ msg: 'User not found' });
+
+    // Get Reset Token
+    const resetToken = crypto.randomBytes(20).toString('hex');
+
+    // Hash token and set to resetPasswordToken field
+    user.resetPasswordToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+    // Set expire (10 mins)
+    user.resetPasswordExpire = Date.now() + 10 * 60 * 1000;
+
+    await user.save();
+
+    const resetUrl = `http://localhost:5173/reset-password/${resetToken}`;
+
+    console.log(`\n--- PASSWORD RESET REQUEST ---`);
+    console.log(`To: ${email}`);
+    console.log(`Link: ${resetUrl}`);
+    console.log(`------------------------------\n`);
+
+    res.json({ success: true, data: 'Email sent (Logged to server console)' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// Reset Password
+app.put('/api/auth/reset-password/:resetToken', async (req, res) => {
+  try {
+    const resetPasswordToken = crypto.createHash('sha256').update(req.params.resetToken).digest('hex');
+
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) return res.status(400).json({ msg: 'Invalid token' });
+
+    // Set new password
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(req.body.password, salt);
+
+    // Clear tokens
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+
+    await user.save();
+
+    res.json({ success: true, data: 'Password updated' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
 
 const classroomRoutes = require('./routes/classrooms');
 const resourceRoutes = require('./routes/resources');
@@ -91,6 +148,7 @@ app.use('/api/classrooms', classroomRoutes);
 app.use('/api', resourceRoutes);
 app.use('/api/submissions', require('./routes/submissions'));
 app.use('/api/announcements', require('./routes/announcements'));
+app.use('/api/users', require('./routes/users'));
 
 // Socket.io handlers
 // In-memory store for room participants (for demo purposes)
@@ -100,9 +158,9 @@ const roomUsers = {};
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('join-room', async ({ roomId, userId, name }) => {
+  socket.on('join-room', async ({ roomId, userId, name, isVideoOff, isMuted }) => {
     try {
-      console.log(`[DEBUG] Join Request: Room ${roomId}, User ${userId}, Name ${name}`);
+      console.log(`[DEBUG] Join Request: Room ${roomId}, User ${userId}, Name ${name}, VideoOff: ${isVideoOff}, Muted: ${isMuted}`);
 
       const classroom = await Classroom.findById(roomId);
 
@@ -131,8 +189,10 @@ io.on('connection', (socket) => {
         }
       }
 
+      const role = isTeacher ? 'teacher' : 'student';
+
       socket.join(roomId);
-      console.log(`User ${userId} joined room ${roomId}`);
+      console.log(`User ${userId} (${role}) joined room ${roomId}`);
 
       // Track user
       if (!roomUsers[roomId]) roomUsers[roomId] = [];
@@ -148,32 +208,60 @@ io.on('connection', (socket) => {
 
       // Remove if already exists (re-join with new socket or zombie)
       roomUsers[roomId] = roomUsers[roomId].filter(u => u.userId !== userId);
-      roomUsers[roomId].push({ userId, name, socketId: socket.id });
+      // [UPDATE] Store initial media state
+      roomUsers[roomId].push({ userId, name, socketId: socket.id, role, isVideoOff, isMuted });
+
+      // Store session data on socket for global disconnect handler
+      socket.roomId = roomId;
+      socket.userId = userId;
 
       // Send existing users to new user
       socket.emit('all-users', roomUsers[roomId].filter(u => u.userId !== userId));
 
-      // Broadcast to others
-      socket.to(roomId).emit('user-connected', { userId, name });
-
-      socket.on('disconnect', () => {
-        console.log('User disconnected:', userId);
-        if (roomUsers[roomId]) {
-          roomUsers[roomId] = roomUsers[roomId].filter(u => u.userId !== userId);
-        }
-        socket.to(roomId).emit('user-disconnected', { userId, socketId: socket.id });
-      });
-
-
-
+      // Broadcast to others with media state
+      socket.to(roomId).emit('user-connected', { userId, name, socketId: socket.id, role, isVideoOff, isMuted });
     } catch (err) {
       console.error("Socket Join Error:", err);
       socket.emit('error', 'Server error joining room');
     }
   });
 
+  socket.on('disconnect', () => {
+    const { roomId, userId } = socket;
+    if (roomId && userId) {
+      console.log(`[Disconnect] User ${userId} disconnected from Room ${roomId}`);
+      if (roomUsers[roomId]) {
+        roomUsers[roomId] = roomUsers[roomId].filter(u => u.userId !== userId);
+        // Clean up empty room
+        if (roomUsers[roomId].length === 0) {
+          delete roomUsers[roomId];
+        }
+      }
+      socket.to(roomId).emit('user-disconnected', { userId, socketId: socket.id });
+    } else {
+      console.log('[Disconnect] User disconnected (No active room session)');
+    }
+  });
+
+  socket.on('leave-room', ({ roomId, userId }) => {
+    console.log(`[Leave] User ${userId} explicitly left Room ${roomId}`);
+    if (roomUsers[roomId]) {
+      roomUsers[roomId] = roomUsers[roomId].filter(u => u.userId !== userId);
+      if (roomUsers[roomId].length === 0) {
+        delete roomUsers[roomId];
+      }
+    }
+    socket.to(roomId).emit('user-disconnected', { userId, socketId: socket.id });
+    socket.leave(roomId);
+
+    // Clear session data
+    socket.roomId = null;
+    socket.userId = null;
+  });
+
   // Dashboard/Classroom View Socket Logic
   socket.on('join-classroom-dashboard', ({ roomId }) => {
+    console.log(`[DEBUG] Socket ${socket.id} joining dashboard-${roomId}`);
     socket.join(`dashboard-${roomId}`);
   });
 
@@ -208,6 +296,10 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('user-lowered-hand', userId);
   });
 
+  socket.on('toggle-media', ({ roomId, userId, isVideoOff, isMuted }) => {
+    io.to(roomId).emit('user-toggled-media', { userId, isVideoOff, isMuted });
+  });
+
   socket.on('end-class', async ({ roomId, userId }) => {
     try {
       const classroom = await Classroom.findById(roomId);
@@ -240,4 +332,6 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  // Start Cron Jobs
+  require('./cron/cleanup');
 });
